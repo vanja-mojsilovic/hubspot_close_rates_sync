@@ -1,0 +1,5 @@
+# Ignore any .venv folder anywhere in the project
+**/.venv/
+
+# Ignore any .env file anywhere in the project
+**/.env

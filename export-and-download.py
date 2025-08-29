@@ -1,26 +1,16 @@
 import os
 import requests
 import json
-import csv
 from datetime import datetime
 from dotenv import load_dotenv
-import gspread
-from google.oauth2.service_account import Credentials
 
-
-# Step 0: Load environment variables
-from dotenv import load_dotenv
+# Step 1: Load token from .env
 load_dotenv()
-
-# Step 1: Load environment variables
 ACCESS_TOKEN = os.getenv("HUBSPOT_TOKEN")
 HEADERS = {
     "Authorization": f"Bearer {ACCESS_TOKEN}",
     "Content-Type": "application/json"
 }
-
-# Load JSON string from .env
-credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
 # Step 2: Convert July 2025 date range to UNIX timestamps (milliseconds)
 start_date = int(datetime(2025, 7, 1, 0, 0).timestamp() * 1000)
@@ -30,7 +20,7 @@ end_date   = int(datetime(2025, 7, 31, 23, 59, 59).timestamp() * 1000)
 calls = []
 after = None
 
-# Step 4: Fetch filtered calls from HubSpot
+# Step 4: Fetch filtered calls
 while len(calls) < 10000:
     body = {
         "filterGroups": [{
@@ -78,35 +68,15 @@ while len(calls) < 10000:
 
     print(f"Fetched {len(calls)} filtered July calls so far...")
 
+# Step 5: Export to timestamped CSV
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+filename = f"Calls in July 2025 filtered by owner {timestamp}.csv"
+filepath = os.path.join(os.path.expanduser("~"), "Downloads", filename)
 
-# Write it to a temporary file
-with open("service_account.json", "w") as f:
-    f.write(credentials_json)
+import csv
+with open(filepath, mode="w", newline="", encoding="utf-8") as file:
+    writer = csv.writer(file)
+    writer.writerow(["ID", "Title", "Timestamp", "Description", "OwnerID"])
+    writer.writerows(calls)
 
-
-# Step 5: Authenticate with Google Sheets
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
-client = gspread.authorize(creds)
-
-# Step 6: Open the target sheet
-sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1EyE_Je9XI5gvIwbcpWy6bnoUxZNwNLD6PSUIRdsrYww/edit").worksheet("calls")
-
-# Step 7: Prepare rows for insertion
-rows = [
-    ["ID", "Title", "Timestamp", "Description", "OwnerID"]
-]
-for call in calls:
-    rows.append([
-        call[0],
-        call[1],
-        call[2],
-        call[3],
-        call[4]
-    ])
-
-# Step 8: Insert into Google Sheets
-sheet.append_rows(rows, value_input_option="RAW")
-print(f" Inserted {len(calls)} calls into Google Sheets.")
-#  Clean up the temporary credentials file
-os.remove("service_account.json")
+print(f"Exported {len(calls)} calls to {filepath}")

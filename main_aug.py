@@ -7,8 +7,12 @@ import gspread
 from google.oauth2.service_account import Credentials
 from collections import defaultdict
 
-# Step 0: Load environment variables
-load_dotenv()
+# Optional dotenv support for local runs
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not needed in GitHub Actions
 
 # Step 1: Load tokens and credentials
 ACCESS_TOKEN = os.getenv("HUBSPOT_TOKEN")

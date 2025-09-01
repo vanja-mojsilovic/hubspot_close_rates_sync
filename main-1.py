@@ -1,36 +1,30 @@
 import os
 import requests
 import json
-import csv
 from datetime import datetime
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 
-
 # Step 0: Load environment variables
-from dotenv import load_dotenv
 load_dotenv()
 
-# Step 1: Load environment variables
+# Step 1: Load tokens and credentials
 ACCESS_TOKEN = os.getenv("HUBSPOT_TOKEN")
 HEADERS = {
     "Authorization": f"Bearer {ACCESS_TOKEN}",
     "Content-Type": "application/json"
 }
-
-# Load JSON string from .env
 credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
 # Step 2: Convert July 2025 date range to UNIX timestamps (milliseconds)
 start_date = int(datetime(2025, 7, 1, 0, 0).timestamp() * 1000)
 end_date   = int(datetime(2025, 7, 31, 23, 59, 59).timestamp() * 1000)
 
-# Step 3: Initialize variables
+# Step 3: Fetch filtered calls from HubSpot
 calls = []
 after = None
 
-# Step 4: Fetch filtered calls from HubSpot
 while len(calls) < 10000:
     body = {
         "filterGroups": [{
@@ -78,35 +72,71 @@ while len(calls) < 10000:
 
     print(f"Fetched {len(calls)} filtered July calls so far...")
 
-
-# Write it to a temporary file
+# Step 4: Write credentials to a temporary file
 with open("service_account.json", "w") as f:
     f.write(credentials_json)
-
 
 # Step 5: Authenticate with Google Sheets
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 
-# Step 6: Open the target sheet
+# Step 6: Insert calls into "Calls" sheet
 sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1HkvNSwUatcwilCFjUGktQfqRtZE_BHsKbRt_JnU_K7Y/edit").worksheet("Calls")
 
-# Step 7: Prepare rows for insertion
-rows = [
-    ["ID", "Title", "Timestamp", "Description", "OwnerID"]
-]
-for call in calls:
-    rows.append([
-        call[0],
-        call[1],
-        call[2],
-        call[3],
-        call[4]
-    ])
+rows = [["ID", "Title", "Timestamp", "Description", "OwnerID"]]
+rows.extend(calls)
 
-# Step 8: Insert into Google Sheets
 sheet.append_rows(rows, value_input_option="RAW")
-print(f" Inserted {len(calls)} calls into Google Sheets.")
-#  Clean up the temporary credentials file
+print(f"✅ Inserted {len(calls)} calls into Calls sheet.")
+
+# Step 7: Fetch and filter owners assigned to team ID 16450
+owners = []
+after = None
+
+while True:
+    url = "https://api.hubapi.com/crm/v3/owners?limit=100"
+    if after:
+        url += f"&after={after}"
+
+    response = requests.get(url, headers=HEADERS)
+    if response.status_code != 200:
+        print("Error fetching owners:", response.text)
+        break
+
+    data = response.json()
+    for owner in data.get("results", []):
+        teams = owner.get("teams", [])
+        if any(str(team.get("id")) == "16450" for team in teams):
+            owners.append([
+                owner.get("id", ""),
+                owner.get("userId", ""),
+                owner.get("email", ""),
+                owner.get("firstName", ""),
+                owner.get("lastName", ""),
+                owner.get("createdAt", ""),
+                owner.get("updatedAt", ""),
+                owner.get("archived", ""),
+                ", ".join([team.get("name", "") for team in teams]),
+                ", ".join([str(team.get("id", "")) for team in teams])
+            ])
+
+    after = data.get("paging", {}).get("next", {}).get("after")
+    if not after:
+        break
+
+print(f"✅ Fetched {len(owners)} owners assigned to team ID 16450.")
+
+# Step 8: Insert owners into "Sales_team" sheet
+sales_sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1HkvNSwUatcwilCFjUGktQfqRtZE_BHsKbRt_JnU_K7Y/edit").worksheet("Sales_team")
+
+owner_rows = [
+    ["OwnerID", "UserID", "Email", "FirstName", "LastName", "CreatedAt", "UpdatedAt", "Archived", "TeamNames", "TeamIDs"]
+]
+owner_rows.extend(owners)
+
+sales_sheet.append_rows(owner_rows, value_input_option="RAW")
+print(f"✅ Inserted {len(owners)} owners into Sales_team sheet.")
+
+# Step 9: Clean up credentials file
 os.remove("service_account.json")

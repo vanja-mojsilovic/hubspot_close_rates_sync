@@ -1,3 +1,1 @@
-import json
-with open("service_account.json") as f:
-    print(json.dumps(json.load(f)))
+GET https://api.hubapi.com/settings/v3/users/teams

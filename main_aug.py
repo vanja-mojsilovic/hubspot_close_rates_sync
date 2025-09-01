@@ -16,14 +16,14 @@ except ImportError:
 # Step 1: Load tokens and credentials
 ACCESS_TOKEN = os.getenv("HUBSPOT_TOKEN")
 if not ACCESS_TOKEN:
-    raise RuntimeError("HUBSPOT_TOKEN is missing. Check your .env.")
+    raise RuntimeError("HUBSPOT_TOKEN is missing. Check your .env or GitHub Actions secrets.")
 HEADERS = {
     "Authorization": f"Bearer {ACCESS_TOKEN}",
     "Content-Type": "application/json"
 }
 credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
 if not credentials_json:
-    raise RuntimeError("GOOGLE_CREDENTIALS_JSON is missing. Check your .env.")
+    raise RuntimeError("GOOGLE_CREDENTIALS_JSON is missing. Check your .env or GitHub Actions secrets.")
 
 # Step 2: Define daily partitions for August 2025
 def ms(dt: datetime) -> int:
@@ -85,10 +85,6 @@ print(f"🔎 Owners prepared for matching: {len(sales_owner_ids)}")
 call_counts = defaultdict(int)
 
 for start_ts, end_ts in daily_ranges:
-    human_start = datetime.fromtimestamp(start_ts / 1000)
-    human_end = datetime.fromtimestamp(end_ts / 1000)
-    print(f"📆 Processing: {human_start.date()}")
-
     after = None
     page_count = 0
     max_pages = 100
@@ -116,8 +112,6 @@ for start_ts, end_ts in daily_ranges:
 
         if response.status_code != 200:
             print("❌ Error fetching calls:", response.text)
-            print("Last paging token:", after)
-            print("Request body:", json.dumps(body, indent=2))
             break
 
         data = response.json()
@@ -127,20 +121,59 @@ for start_ts, end_ts in daily_ranges:
 
         for call in results:
             owner_id = call.get("properties", {}).get("hubspot_owner_id")
-            if owner_id:
-                owner_id = str(owner_id)
-                if owner_id in sales_owner_ids:
-                    call_counts[owner_id] += 1
+            if owner_id and str(owner_id) in sales_owner_ids:
+                call_counts[str(owner_id)] += 1
 
         after = data.get("paging", {}).get("next", {}).get("after")
         if not after:
             break
 
         page_count += 1
-        print(f"📞 Total calls so far: {sum(call_counts.values())} (Page {page_count})")
 
-    if page_count >= max_pages and after:
-        print("⚠️ Hit page cap on", human_start.date(), "— consider hourly partitioning if needed.")
+# Step 5b: Fetch meetings per daily range and count per OwnerID
+meeting_counts = defaultdict(int)
+allowed_types = ["New Demo Meeting", "Sales Meeting Scheduled - Pitch/Demo"]
+
+for start_ts, end_ts in daily_ranges:
+    offset = 0
+    page_count = 0
+    max_pages = 100
+
+    while page_count < max_pages:
+        url = f"https://api.hubapi.com/engagements/v1/engagements/paged?limit=100&offset={offset}"
+        response = requests.get(url, headers=HEADERS)
+
+        if response.status_code != 200:
+            print("❌ Error fetching meetings:", response.text)
+            break
+
+        data = response.json()
+        engagements = data.get("results", [])
+        if not engagements:
+            break
+
+        for eng in engagements:
+            if eng.get("engagement", {}).get("type") != "MEETING":
+                continue
+
+            ts = eng["engagement"].get("timestamp", 0)
+            if not (start_ts <= ts < end_ts):
+                continue
+
+            owner_id = str(eng["engagement"].get("ownerId", ""))
+            if owner_id not in sales_owner_ids:
+                continue
+
+            metadata = eng.get("metadata", {})
+            meeting_type = metadata.get("call_and_meeting_type", "")
+            if meeting_type in allowed_types:
+                meeting_counts[owner_id] += 1
+
+        offset = data.get("offset")
+        if not data.get("hasMore") or not offset:
+            break
+
+        page_count += 1
 
 # Step 6: Write credentials to a temporary file
 with open("service_account.json", "w") as f:
@@ -151,28 +184,45 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 client = gspread.authorize(creds)
 
-# Step 8: Build enriched summary
-summary_rows = [["OwnerID", "Email", "FirstName", "LastName", "NumberOfCalls"]]
-
+# Step 8: Build enriched summaries
 def sort_key(oid):
     email, first, last = owner_lookup.get(oid, ("", "", ""))
     return (last or "", first or "", oid)
 
+call_rows = [["OwnerID", "Email", "FirstName", "LastName", "NumberOfCalls"]]
+meeting_rows = [["OwnerID", "Email", "FirstName", "LastName", "NumberOfMeetings"]]
+
 for owner_id in sorted(sales_owner_ids, key=sort_key):
     email, first, last = owner_lookup.get(owner_id, ("", "", ""))
-    count = call_counts.get(owner_id, 0)
-    summary_rows.append([owner_id, email, first, last, count])
+    call_count = call_counts.get(owner_id, 0)
+    meeting_count = meeting_counts.get(owner_id, 0)
+    call_rows.append([owner_id, email, first, last, call_count])
+    meeting_rows.append([owner_id, email, first, last, meeting_count])
 
-# Step 9: Overwrite "number_of_calls_august" sheet
-summary_sheet = client.open_by_url(
+# Step 9a: Overwrite "number_of_calls_august" sheet
+spreadsheet = client.open_by_url(
     "https://docs.google.com/spreadsheets/d/1HkvNSwUatcwilCFjUGktQfqRtZE_BHsKbRt_JnU_K7Y/edit"
-).worksheet("number_of_calls_august")
+)
 
-summary_sheet.clear()
-summary_sheet.update(values=summary_rows, range_name="A1", value_input_option="RAW")
+try:
+    call_sheet = spreadsheet.worksheet("number_of_calls_august")
+except gspread.exceptions.WorksheetNotFound:
+    call_sheet = spreadsheet.add_worksheet(title="number_of_calls_august", rows="1000", cols="10")
 
-print(f"✅ Overwrote 'number_of_calls_august' with {len(summary_rows)-1} owners "
-      f"(calls found for {len(call_counts)}; zero-filled {len(sales_owner_ids) - len(call_counts)}).")
+call_sheet.clear()
+call_sheet.update(values=call_rows, range_name="A1", value_input_option="RAW")
+
+# Step 9b: Overwrite "meetings_august" sheet
+try:
+    meetings_sheet = spreadsheet.worksheet("meetings_august")
+except gspread.exceptions.WorksheetNotFound:
+    meetings_sheet = spreadsheet.add_worksheet(title="meetings_august", rows="1000", cols="10")
+
+meetings_sheet.clear()
+meetings_sheet.update(values=meeting_rows, range_name="A1", value_input_option="RAW")
+
+print(f"✅ Overwrote 'number_of_calls_august' with {len(call_rows)-1} owners.")
+print(f"✅ Overwrote 'meetings_august' with {len(meeting_rows)-1} owners.")
 
 # Step 10: Clean up credentials file
 os.remove("service_account.json")
